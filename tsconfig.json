@@ -1,0 +1,12 @@
+{
+  "files": [],
+  "references": [
+    { "path": "apps/desktop" },
+    { "path": "packages/core" },
+    { "path": "packages/db" },
+    { "path": "packages/external-agents" },
+    { "path": "packages/local-runtime" },
+    { "path": "packages/orchestrator" },
+    { "path": "packages/ui" }
+  ]
+}

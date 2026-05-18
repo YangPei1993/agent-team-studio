@@ -1,0 +1,282 @@
+{
+  "version": "1.0.0",
+  "rules": {
+    "installationIsOptional": true,
+    "allowSkipAlways": true,
+    "neverSilentInstall": true,
+    "commandsMustBeHardcoded": true,
+    "llmMayNotGenerateShellCommands": true
+  },
+  "agents": [
+    {
+      "id": "codex_cli",
+      "displayName": "Codex CLI",
+      "type": "external_cli",
+      "description": "OpenAI local coding agent that can inspect repositories, edit files, and run commands in a selected directory.",
+      "commandNames": [
+        "codex"
+      ],
+      "detect": {
+        "posixPathCommand": "command -v codex",
+        "windowsPathCommand": "where codex",
+        "versionCommand": "codex --version",
+        "runCommand": "codex"
+      },
+      "auth": {
+        "method": "interactive_first_run",
+        "loginCommand": "codex",
+        "notes": "First run prompts sign-in with ChatGPT account or API key. Auth detection should be non-destructive; if uncertain, show Test."
+      },
+      "capabilities": [
+        "read_project",
+        "write_files",
+        "execute_shell",
+        "git_diff",
+        "parallel_sessions"
+      ],
+      "installOptions": [
+        {
+          "id": "npm_global",
+          "label": "npm global install",
+          "platforms": [
+            "macos",
+            "linux",
+            "windows"
+          ],
+          "command": "npm i -g @openai/codex",
+          "requiresConfirmation": true,
+          "riskLevel": "medium",
+          "source": "official"
+        },
+        {
+          "id": "homebrew_cask",
+          "label": "Homebrew cask",
+          "platforms": [
+            "macos"
+          ],
+          "command": "brew install --cask codex",
+          "requiresConfirmation": true,
+          "riskLevel": "medium",
+          "source": "official"
+        }
+      ],
+      "docsUrl": "https://developers.openai.com/codex/cli"
+    },
+    {
+      "id": "claude_code",
+      "displayName": "Claude Code",
+      "type": "external_cli",
+      "description": "Anthropic coding agent that can read codebases, edit files, and run commands after user authentication.",
+      "commandNames": [
+        "claude"
+      ],
+      "detect": {
+        "posixPathCommand": "command -v claude",
+        "windowsPathCommand": "where claude",
+        "versionCommand": "claude --version",
+        "runCommand": "claude"
+      },
+      "auth": {
+        "method": "interactive_first_run",
+        "loginCommand": "claude",
+        "notes": "Run claude and follow browser prompts. If auth cannot be detected safely, show Needs sign-in or Test."
+      },
+      "capabilities": [
+        "read_project",
+        "write_files",
+        "execute_shell",
+        "git_diff"
+      ],
+      "installOptions": [
+        {
+          "id": "native_posix",
+          "label": "Native install for macOS/Linux/WSL",
+          "platforms": [
+            "macos",
+            "linux",
+            "wsl"
+          ],
+          "command": "curl -fsSL https://claude.ai/install.sh | bash",
+          "requiresConfirmation": true,
+          "riskLevel": "high",
+          "source": "official",
+          "warning": "This runs a remote shell script. Show the full command and require explicit confirmation."
+        },
+        {
+          "id": "native_windows_powershell",
+          "label": "Native install for Windows PowerShell",
+          "platforms": [
+            "windows"
+          ],
+          "command": "irm https://claude.ai/install.ps1 | iex",
+          "requiresConfirmation": true,
+          "riskLevel": "high",
+          "source": "official",
+          "warning": "This runs a remote PowerShell script. Show the full command and require explicit confirmation."
+        },
+        {
+          "id": "homebrew_cask",
+          "label": "Homebrew cask",
+          "platforms": [
+            "macos"
+          ],
+          "command": "brew install --cask claude-code",
+          "requiresConfirmation": true,
+          "riskLevel": "medium",
+          "source": "official"
+        },
+        {
+          "id": "winget",
+          "label": "WinGet",
+          "platforms": [
+            "windows"
+          ],
+          "command": "winget install Anthropic.ClaudeCode",
+          "requiresConfirmation": true,
+          "riskLevel": "medium",
+          "source": "official"
+        },
+        {
+          "id": "npm_global",
+          "label": "npm global install",
+          "platforms": [
+            "macos",
+            "linux",
+            "windows"
+          ],
+          "command": "npm install -g @anthropic-ai/claude-code",
+          "requiresConfirmation": true,
+          "riskLevel": "medium",
+          "source": "official_alternative"
+        }
+      ],
+      "docsUrl": "https://code.claude.com/docs/en/setup"
+    },
+    {
+      "id": "gemini_cli",
+      "displayName": "Gemini CLI",
+      "type": "external_cli",
+      "description": "Google open-source terminal AI agent with file operations, shell commands, web fetching, Google Search grounding, and MCP support.",
+      "commandNames": [
+        "gemini"
+      ],
+      "detect": {
+        "posixPathCommand": "command -v gemini",
+        "windowsPathCommand": "where gemini",
+        "versionCommand": "gemini --version",
+        "runCommand": "gemini"
+      },
+      "auth": {
+        "method": "interactive_or_api_key",
+        "loginCommand": "gemini",
+        "notes": "User can sign in with Google or configure GEMINI_API_KEY / Vertex AI settings."
+      },
+      "capabilities": [
+        "read_project",
+        "write_files",
+        "execute_shell",
+        "web_search",
+        "mcp",
+        "stream_json"
+      ],
+      "installOptions": [
+        {
+          "id": "npx_no_install",
+          "label": "Run with npx, no global install",
+          "platforms": [
+            "macos",
+            "linux",
+            "windows"
+          ],
+          "command": "npx @google/gemini-cli",
+          "requiresConfirmation": true,
+          "riskLevel": "medium",
+          "source": "official",
+          "notes": "This can run without permanent installation; still requires user confirmation."
+        },
+        {
+          "id": "npm_global",
+          "label": "npm global install",
+          "platforms": [
+            "macos",
+            "linux",
+            "windows"
+          ],
+          "command": "npm install -g @google/gemini-cli",
+          "requiresConfirmation": true,
+          "riskLevel": "medium",
+          "source": "official"
+        },
+        {
+          "id": "homebrew",
+          "label": "Homebrew",
+          "platforms": [
+            "macos",
+            "linux"
+          ],
+          "command": "brew install gemini-cli",
+          "requiresConfirmation": true,
+          "riskLevel": "medium",
+          "source": "official"
+        }
+      ],
+      "docsUrl": "https://github.com/google-gemini/gemini-cli"
+    },
+    {
+      "id": "ollama",
+      "displayName": "Ollama",
+      "type": "local_model",
+      "description": "Local model runner for open models.",
+      "commandNames": [
+        "ollama"
+      ],
+      "detect": {
+        "posixPathCommand": "command -v ollama",
+        "windowsPathCommand": "where ollama",
+        "versionCommand": "ollama --version",
+        "runCommand": "ollama"
+      },
+      "auth": {
+        "method": "none_or_account_optional",
+        "notes": "Local models may not require cloud auth."
+      },
+      "capabilities": [
+        "local_model",
+        "offline_optional"
+      ],
+      "installOptions": [
+        {
+          "id": "linux_shell",
+          "label": "Linux shell install",
+          "platforms": [
+            "linux"
+          ],
+          "command": "curl -fsSL https://ollama.com/install.sh | sh",
+          "requiresConfirmation": true,
+          "riskLevel": "high",
+          "source": "official",
+          "warning": "This runs a remote shell script. Show full command and require explicit confirmation."
+        }
+      ],
+      "docsUrl": "https://ollama.com/"
+    },
+    {
+      "id": "custom_command",
+      "displayName": "Custom Command Agent",
+      "type": "custom_command",
+      "description": "User-defined command adapter for internal or third-party agents.",
+      "commandNames": [],
+      "detect": {
+        "userProvidedPath": true
+      },
+      "auth": {
+        "method": "user_defined"
+      },
+      "capabilities": [
+        "user_configured"
+      ],
+      "installOptions": [],
+      "docsUrl": null
+    }
+  ]
+}

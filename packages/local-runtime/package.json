@@ -1,0 +1,12 @@
+{
+  "name": "@agent-team-studio/local-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@agent-team-studio/core": "0.1.0"
+  }
+}

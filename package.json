@@ -1,0 +1,22 @@
+{
+  "name": "agent-team-studio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run tauri:dev --workspace @agent-team-studio/app",
+    "tauri:dev": "npm run tauri:dev --workspace @agent-team-studio/app",
+    "tauri:build": "npm run tauri:build --workspace @agent-team-studio/app",
+    "build": "npm run build --workspace @agent-team-studio/app",
+    "test": "npm run test --workspace @agent-team-studio/app",
+    "typecheck": "tsc -b packages/core packages/db packages/external-agents packages/local-runtime packages/orchestrator packages/ui && tsc --noEmit -p apps/desktop/tsconfig.json",
+    "check": "npm run typecheck && npm run test && npm run build"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": ".test-output",
+    "module": "ESNext",
+    "moduleResolution": "Bundler"
+  },
+  "include": [
+    "src/lib/conversations.ts",
+    "src/lib/mentions.ts",
+    "src/lib/participantViewModels.ts",
+    "src/lib/turnStatus.ts",
+    "src/lib/userVisibleThreadItems.ts"
+  ]
+}
