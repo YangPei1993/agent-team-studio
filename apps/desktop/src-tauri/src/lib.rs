@@ -18,6 +18,7 @@ use std::{
 use tauri::{Emitter, Manager, State};
 
 const DATABASE_FILE: &str = "agent-team-studio.sqlite3";
+const LEGACY_APP_DATA_DIR_NAMES: [&str; 1] = ["com.agentteamstudio.desktop"];
 const SETTINGS_KEY: &str = "app_settings";
 const SCHEMA_SQL: &str = include_str!("../../../../packages/db/migrations/001_init.sql");
 const SOLO_THREAD_SCHEMA_SQL: &str =
@@ -494,6 +495,7 @@ struct TeamProfileView {
     strategy: String,
     aggregator_profile_id: Option<String>,
     runtime_policy: String,
+    orchestration_prompt: Option<String>,
     enabled: bool,
     members: Vec<TeamMemberProfileView>,
     created_at: String,
@@ -517,6 +519,7 @@ struct TeamProfileInput {
     strategy: String,
     aggregator_profile_id: Option<String>,
     runtime_policy: Option<String>,
+    orchestration_prompt: Option<String>,
     enabled: Option<bool>,
     members: Option<Vec<TeamMemberProfileInput>>,
 }
@@ -548,6 +551,7 @@ struct ResolvedTeamInvocation {
     description: Option<String>,
     strategy: String,
     runtime_policy: String,
+    orchestration_prompt: Option<String>,
     members: Vec<ResolvedAgentInvocation>,
 }
 
@@ -1182,6 +1186,8 @@ fn conversation_set_main_runtime(
             team_profile_id: None,
             session_id: Some(&main_session_id),
             parent_team_session_id: None,
+            team_orchestration_prompt: None,
+            team_member_assignment: None,
             invocation_id: None,
             block_id: None,
         })
@@ -1857,6 +1863,7 @@ fn conversation_send_message(
                             "description": team.description.as_deref(),
                             "strategy": &team.strategy,
                             "runtimePolicy": &team.runtime_policy,
+                            "orchestrationPrompt": team.orchestration_prompt.as_deref(),
                             "members": &member_names,
                         },
                         "runtime": { "id": &team.runtime_agent_id },
@@ -1882,6 +1889,7 @@ fn conversation_send_message(
                         "runtimeId": &team.runtime_agent_id,
                         "name": &team.name,
                         "strategy": &team.strategy,
+                        "orchestrationPrompt": team.orchestration_prompt.as_deref(),
                         "status": "queued",
                         "summary": &team_summary,
                         "members": &member_names,
@@ -2672,6 +2680,7 @@ fn spawn_delegated_runtime_turn(job: DelegatedRuntimeTurnJob) {
                         pending,
                         &project_root,
                         &user_request,
+                        None,
                         cancel_flag.clone(),
                     );
                     if output.status == "cancelled" {
@@ -2685,6 +2694,7 @@ fn spawn_delegated_runtime_turn(job: DelegatedRuntimeTurnJob) {
                         run_pending_team_invocation(
                             &app_handle,
                             &conn,
+                            &db_path,
                             &conversation_id,
                             &turn_id,
                             pending,
@@ -4628,7 +4638,10 @@ fn export_diagnostics(
 }
 
 fn open_connection(db_path: &PathBuf) -> Result<Connection, String> {
-    Connection::open(db_path).map_err(|error| error.to_string())
+    let conn = Connection::open(db_path).map_err(|error| error.to_string())?;
+    conn.busy_timeout(Duration::from_secs(5))
+        .map_err(|error| error.to_string())?;
+    Ok(conn)
 }
 
 fn validate_access_mode(access_mode: &str) -> Result<(), String> {
@@ -5083,6 +5096,7 @@ fn resolve_team_mention(
             description: team.description,
             strategy: team.strategy,
             runtime_policy: team.runtime_policy,
+            orchestration_prompt: team.orchestration_prompt,
             members,
         };
     }
@@ -5100,6 +5114,7 @@ fn resolve_team_mention(
         description: Some("Template team invoked from the composer.".to_string()),
         strategy: "parallel_consensus".to_string(),
         runtime_policy: "conversation_main".to_string(),
+        orchestration_prompt: None,
         members: vec![
             fallback_agent_invocation(
                 &format!("@{} / coordinator", team_name),
@@ -5272,6 +5287,7 @@ fn build_delegation_plan(
                     "teamProfileId": team.team_profile_id.as_deref(),
                     "runtimeId": &team.runtime_agent_id,
                     "task": format!("{} Coordinate the team with the {} strategy and return a normalized result.", user_task, team.strategy),
+                    "orchestrationPrompt": team.orchestration_prompt.as_deref(),
                     "required": true,
                     "runMode": "suggest_patch",
                     "mention": &team.mention_label,
@@ -5345,6 +5361,26 @@ struct ChildInvocationOutput {
     used_external_runtime: bool,
 }
 
+#[derive(Debug, Clone)]
+struct PlannedTeamMember {
+    original_index: usize,
+    pending: PendingAgentInvocation,
+    assignment: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct TeamExecutionBatch {
+    label: String,
+    members: Vec<PlannedTeamMember>,
+}
+
+#[derive(Debug, Clone)]
+struct TeamExecutionPlan {
+    summary: String,
+    source: &'static str,
+    batches: Vec<TeamExecutionBatch>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_pending_agent_invocation(
     app_handle: &tauri::AppHandle,
@@ -5354,6 +5390,7 @@ fn run_pending_agent_invocation(
     pending: &PendingAgentInvocation,
     project_root: &str,
     user_task: &str,
+    team_member_assignment: Option<&str>,
     cancel_flag: Arc<AtomicBool>,
 ) -> ChildInvocationOutput {
     let context_packet = match AgentInvocationContextBuilder::new(
@@ -5372,6 +5409,8 @@ fn run_pending_agent_invocation(
         team_profile_id: pending.agent.team_profile_id.as_deref(),
         session_id: Some(&pending.agent_session_id),
         parent_team_session_id: pending.parent_team_session_id.as_deref(),
+        team_orchestration_prompt: None,
+        team_member_assignment,
         invocation_id: Some(&pending.invocation_id),
         block_id: Some(&pending.block_id),
     }) {
@@ -5426,6 +5465,7 @@ fn run_pending_agent_invocation(
         &pending.agent,
         project_root,
         &context_packet,
+        team_member_assignment,
         cancel_flag,
         |visible_output| {
             let trimmed_output = visible_output.trim();
@@ -5490,6 +5530,7 @@ fn run_pending_agent_invocation(
 fn run_pending_team_invocation(
     app_handle: &tauri::AppHandle,
     conn: &Connection,
+    db_path: &PathBuf,
     conversation_id: &str,
     turn_id: &str,
     pending: &PendingTeamInvocation,
@@ -5513,6 +5554,8 @@ fn run_pending_team_invocation(
         team_profile_id: pending.team.team_profile_id.as_deref(),
         session_id: Some(&pending.team_session_id),
         parent_team_session_id: None,
+        team_orchestration_prompt: pending.team.orchestration_prompt.as_deref(),
+        team_member_assignment: None,
         invocation_id: Some(&pending.invocation_id),
         block_id: Some(&pending.block_id),
     }) {
@@ -5563,31 +5606,63 @@ fn run_pending_team_invocation(
     );
     emit_conversation_blocks_updated(app_handle, conn, conversation_id, turn_id);
 
-    let mut member_summaries = Vec::new();
-    let mut cancelled = false;
-    for member in &pending.members {
-        if cancel_flag.load(Ordering::SeqCst) {
-            cancelled = true;
-            break;
-        }
-        let output = run_pending_agent_invocation(
-            app_handle,
-            conn,
-            conversation_id,
-            turn_id,
-            member,
-            project_root,
-            user_task,
-            cancel_flag.clone(),
-        );
-        if output.status == "cancelled" {
-            cancelled = true;
-        }
-        member_summaries.push(output.summary);
-        if cancelled {
-            break;
-        }
-    }
+    let execution_plan = build_team_execution_plan(
+        pending,
+        project_root,
+        user_task,
+        &context_packet,
+        cancel_flag.clone(),
+    );
+    let plan_summary = format!(
+        "{} execution plan: {}",
+        pending.team.name, execution_plan.summary
+    );
+    let _ = update_pending_team_invocation_payload(
+        conn,
+        pending,
+        "running",
+        &plan_summary,
+        false,
+        Some(&context_summary),
+    );
+    let _ = insert_stream_event_next(
+        conn,
+        "team_invocation.plan.completed",
+        conversation_id,
+        turn_id,
+        Some(&pending.invocation_id),
+        serde_json::json!({
+            "blockId": pending.block_id,
+            "summary": execution_plan.summary,
+            "source": execution_plan.source,
+            "batches": execution_plan.batches.iter().map(|batch| serde_json::json!({
+                "label": batch.label,
+                "members": batch.members.iter().map(|member| serde_json::json!({
+                    "name": member.pending.agent.name,
+                    "role": member.pending.agent.role,
+                    "assignment": member.assignment,
+                })).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+        }),
+    );
+    emit_conversation_blocks_updated(app_handle, conn, conversation_id, turn_id);
+
+    let outputs = run_pending_team_members_from_plan(
+        app_handle,
+        db_path,
+        conversation_id,
+        turn_id,
+        &execution_plan,
+        project_root,
+        user_task,
+        cancel_flag.clone(),
+    );
+    let cancelled = outputs.iter().any(|output| output.status == "cancelled")
+        || cancel_flag.load(Ordering::SeqCst);
+    let member_summaries = outputs
+        .into_iter()
+        .map(|output| output.summary)
+        .collect::<Vec<_>>();
 
     let (status, summary) = if cancelled {
         (
@@ -5639,10 +5714,373 @@ fn run_pending_team_invocation(
     (summary, member_summaries, cancelled)
 }
 
+fn build_team_execution_plan(
+    pending: &PendingTeamInvocation,
+    project_root: &str,
+    user_task: &str,
+    context_packet: &AgentInvocationContextPacket,
+    cancel_flag: Arc<AtomicBool>,
+) -> TeamExecutionPlan {
+    let Some(orchestration_prompt) = pending
+        .team
+        .orchestration_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return default_parallel_team_execution_plan(
+            pending,
+            "default",
+            "No team prompt. Running all members in parallel.",
+        );
+    };
+    let planner_prompt =
+        team_execution_planner_prompt(pending, user_task, orchestration_prompt, context_packet);
+    let output = run_main_runtime_direct_answer_streaming(
+        &pending.team.runtime_agent_id,
+        project_root,
+        &planner_prompt,
+        cancel_flag,
+        |_| {},
+    );
+    if output.status != "completed" {
+        return default_parallel_team_execution_plan(
+            pending,
+            "fallback",
+            &format!(
+                "Team prompt planning failed. Running all members in parallel. {}",
+                output.content
+            ),
+        );
+    }
+    parse_team_execution_plan(&output.content, pending).unwrap_or_else(|| {
+        default_parallel_team_execution_plan(
+            pending,
+            "fallback",
+            "Team prompt planning returned an unreadable plan. Running all members in parallel.",
+        )
+    })
+}
+
+fn default_parallel_team_execution_plan(
+    pending: &PendingTeamInvocation,
+    source: &'static str,
+    summary: &str,
+) -> TeamExecutionPlan {
+    TeamExecutionPlan {
+        summary: summary.to_string(),
+        source,
+        batches: vec![TeamExecutionBatch {
+            label: "Parallel review".to_string(),
+            members: pending
+                .members
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(original_index, pending)| PlannedTeamMember {
+                    original_index,
+                    pending,
+                    assignment: None,
+                })
+                .collect(),
+        }],
+    }
+}
+
+fn team_execution_planner_prompt(
+    pending: &PendingTeamInvocation,
+    user_task: &str,
+    orchestration_prompt: &str,
+    context_packet: &AgentInvocationContextPacket,
+) -> String {
+    let member_manifest = pending
+        .members
+        .iter()
+        .enumerate()
+        .map(|(index, member)| {
+            serde_json::json!({
+                "memberIndex": index,
+                "name": member.agent.name,
+                "role": member.agent.role,
+                "runtimeId": member.agent.runtime_agent_id,
+                "agentProfileId": member.agent.agent_profile_id,
+                "expectedOutputs": member.agent.expected_outputs,
+            })
+        })
+        .collect::<Vec<_>>();
+    let packet_text = context_packet_to_prompt(context_packet).unwrap_or_else(|_| "{}".to_string());
+    format!(
+        "You are the main orchestration planner for `{}` in Agent Team Studio.\n\
+         Return ONLY valid JSON. Do not use markdown fences.\n\n\
+         Team prompt:\n{}\n\n\
+         User request:\n{}\n\n\
+         Available members:\n{}\n\n\
+         Required JSON shape:\n\
+         {{\"summary\":\"short execution plan\",\"batches\":[{{\"label\":\"batch name\",\"members\":[{{\"memberIndex\":0,\"assignment\":\"specific task for this member\"}}]}}]}}\n\n\
+         Rules:\n\
+         - Use every available member exactly once unless the team prompt clearly excludes one.\n\
+         - Members inside the same batch run in parallel.\n\
+         - Batches run in array order.\n\
+         - If no ordering is needed, return one batch containing all members.\n\
+         - Keep assignments concise and actionable.\n\n\
+         AgentInvocationContextPacket:\n{}",
+        pending.team.name,
+        orchestration_prompt,
+        user_task,
+        serde_json::to_string_pretty(&member_manifest).unwrap_or_else(|_| "[]".to_string()),
+        packet_text
+    )
+}
+
+fn parse_team_execution_plan(
+    output: &str,
+    pending: &PendingTeamInvocation,
+) -> Option<TeamExecutionPlan> {
+    let value = extract_json_value(output)?;
+    let summary = value
+        .get("summary")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .unwrap_or("Team prompt generated a member execution plan.")
+        .to_string();
+    let batches_value = value.get("batches")?.as_array()?;
+    let mut used_member_indices = HashSet::new();
+    let mut batches = Vec::new();
+    for (batch_index, batch_value) in batches_value.iter().enumerate() {
+        let label = batch_value
+            .get("label")
+            .and_then(|item| item.as_str())
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("Batch {}", batch_index + 1));
+        let mut members = Vec::new();
+        for member_value in batch_value
+            .get("members")
+            .and_then(|item| item.as_array())?
+        {
+            let member_index = planned_member_index(member_value, pending)?;
+            if !used_member_indices.insert(member_index) {
+                continue;
+            }
+            let assignment = member_value
+                .get("assignment")
+                .or_else(|| member_value.get("task"))
+                .or_else(|| member_value.get("instructions"))
+                .and_then(|item| item.as_str())
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string);
+            members.push(PlannedTeamMember {
+                original_index: member_index,
+                pending: pending.members.get(member_index)?.clone(),
+                assignment,
+            });
+        }
+        if !members.is_empty() {
+            batches.push(TeamExecutionBatch { label, members });
+        }
+    }
+    let unassigned_members = pending
+        .members
+        .iter()
+        .cloned()
+        .enumerate()
+        .filter(|(index, _)| !used_member_indices.contains(index))
+        .map(|(original_index, pending)| PlannedTeamMember {
+            original_index,
+            pending,
+            assignment: None,
+        })
+        .collect::<Vec<_>>();
+    if !unassigned_members.is_empty() {
+        batches.push(TeamExecutionBatch {
+            label: "Unassigned members".to_string(),
+            members: unassigned_members,
+        });
+    }
+    if batches.is_empty() {
+        return None;
+    }
+    Some(TeamExecutionPlan {
+        summary,
+        source: "team_prompt",
+        batches,
+    })
+}
+
+fn extract_json_value(output: &str) -> Option<serde_json::Value> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(output.trim()) {
+        return Some(value);
+    }
+    let start = output.find('{')?;
+    let end = output.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    serde_json::from_str::<serde_json::Value>(&output[start..=end]).ok()
+}
+
+fn planned_member_index(
+    value: &serde_json::Value,
+    pending: &PendingTeamInvocation,
+) -> Option<usize> {
+    if let Some(index) = value.get("memberIndex").and_then(|item| item.as_u64()) {
+        let index = index as usize;
+        if index < pending.members.len() {
+            return Some(index);
+        }
+    }
+    let name = value
+        .get("name")
+        .or_else(|| value.get("memberName"))
+        .or_else(|| value.get("agentName"))
+        .and_then(|item| item.as_str())
+        .map(|item| item.trim().to_lowercase());
+    let profile_id = value
+        .get("agentProfileId")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .filter(|item| !item.is_empty());
+    pending.members.iter().position(|member| {
+        profile_id
+            .is_some_and(|profile_id| member.agent.agent_profile_id.as_deref() == Some(profile_id))
+            || name
+                .as_ref()
+                .is_some_and(|name| member.agent.name.to_lowercase() == *name)
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_pending_team_members_from_plan(
+    app_handle: &tauri::AppHandle,
+    db_path: &PathBuf,
+    conversation_id: &str,
+    turn_id: &str,
+    plan: &TeamExecutionPlan,
+    project_root: &str,
+    user_task: &str,
+    cancel_flag: Arc<AtomicBool>,
+) -> Vec<ChildInvocationOutput> {
+    let mut outputs = Vec::new();
+    for batch in &plan.batches {
+        if cancel_flag.load(Ordering::SeqCst) {
+            outputs.push(ChildInvocationOutput {
+                summary: format!("{} was cancelled before starting.", batch.label),
+                status: "cancelled",
+                used_external_runtime: false,
+            });
+            break;
+        }
+        let mut batch_outputs = run_pending_team_member_batch_parallel(
+            app_handle,
+            db_path,
+            conversation_id,
+            turn_id,
+            &batch.members,
+            project_root,
+            user_task,
+            cancel_flag.clone(),
+        );
+        let cancelled = batch_outputs
+            .iter()
+            .any(|output| output.status == "cancelled");
+        outputs.append(&mut batch_outputs);
+        if cancelled {
+            break;
+        }
+    }
+    outputs
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_pending_team_member_batch_parallel(
+    app_handle: &tauri::AppHandle,
+    db_path: &PathBuf,
+    conversation_id: &str,
+    turn_id: &str,
+    planned_members: &[PlannedTeamMember],
+    project_root: &str,
+    user_task: &str,
+    cancel_flag: Arc<AtomicBool>,
+) -> Vec<ChildInvocationOutput> {
+    let mut handles = Vec::new();
+    for member_plan in planned_members.iter().cloned() {
+        let app_handle = app_handle.clone();
+        let db_path = db_path.clone();
+        let conversation_id = conversation_id.to_string();
+        let turn_id = turn_id.to_string();
+        let project_root = project_root.to_string();
+        let user_task = user_task.to_string();
+        let cancel_flag = cancel_flag.clone();
+        let member = member_plan.pending;
+        let assignment = member_plan.assignment;
+        let member_name = member.agent.name.clone();
+        handles.push((
+            member_plan.original_index,
+            member_name.clone(),
+            thread::spawn(move || {
+                if cancel_flag.load(Ordering::SeqCst) {
+                    return ChildInvocationOutput {
+                        summary: format!("{member_name} was cancelled before starting."),
+                        status: "cancelled",
+                        used_external_runtime: false,
+                    };
+                }
+                let conn = match open_connection(&db_path) {
+                    Ok(conn) => conn,
+                    Err(error) => {
+                        return ChildInvocationOutput {
+                            summary: format!(
+                                "{member_name} could not open the local database: {error}"
+                            ),
+                            status: "failed",
+                            used_external_runtime: false,
+                        };
+                    }
+                };
+                run_pending_agent_invocation(
+                    &app_handle,
+                    &conn,
+                    &conversation_id,
+                    &turn_id,
+                    &member,
+                    &project_root,
+                    &user_task,
+                    assignment.as_deref(),
+                    cancel_flag,
+                )
+            }),
+        ));
+    }
+
+    let mut indexed_outputs = Vec::new();
+    for (index, member_name, handle) in handles {
+        let output = match handle.join() {
+            Ok(output) => output,
+            Err(_) => ChildInvocationOutput {
+                summary: format!(
+                    "{member_name} failed because the member runtime worker panicked."
+                ),
+                status: "failed",
+                used_external_runtime: false,
+            },
+        };
+        indexed_outputs.push((index, output));
+    }
+    indexed_outputs.sort_by_key(|(index, _)| *index);
+    indexed_outputs
+        .into_iter()
+        .map(|(_, output)| output)
+        .collect()
+}
+
 fn run_child_agent_invocation(
     agent: &ResolvedAgentInvocation,
     project_root: &str,
     context_packet: &AgentInvocationContextPacket,
+    team_member_assignment: Option<&str>,
     cancel_flag: Arc<AtomicBool>,
     on_stream: impl FnMut(&str),
 ) -> ChildInvocationOutput {
@@ -5652,11 +6090,15 @@ fn run_child_agent_invocation(
         agent.expected_outputs.join("\n- ")
     };
     let packet_text = context_packet_to_prompt(context_packet).unwrap_or_else(|_| "{}".to_string());
+    let assignment_section = team_member_assignment
+        .map(|assignment| format!("\n\nTeam assignment:\n{assignment}"))
+        .unwrap_or_default();
     let prompt = format!(
-        "You are `{}` in Agent Team Studio.\n\nRole:\n{}\n\nInstructions:\n{}\n\nExpected output:\n- {}\n\nRuntime constraints:\n- Work in read-only mode.\n- Do not edit files, apply patches, install packages, or run destructive commands.\n- Answer only with the child-agent output needed by the main agent.\n- Match the user's language.\n- Use the AgentInvocationContextPacket below. Do not answer from the latest user message alone.\n- Do not reveal hidden reasoning, raw runtime logs, API keys, or sensitive file contents.\n\nAgentInvocationContextPacket:\n{}",
+        "You are `{}` in Agent Team Studio.\n\nRole:\n{}\n\nInstructions:\n{}{}\n\nExpected output:\n- {}\n\nRuntime constraints:\n- Work in read-only mode.\n- Do not edit files, apply patches, install packages, or run destructive commands.\n- Answer only with the child-agent output needed by the main agent.\n- Match the user's language.\n- Use the AgentInvocationContextPacket below. Do not answer from the latest user message alone.\n- Do not reveal hidden reasoning, raw runtime logs, API keys, or sensitive file contents.\n\nAgentInvocationContextPacket:\n{}",
         agent.name,
         agent.role,
         agent.instructions,
+        assignment_section,
         expected_outputs,
         packet_text
     );
@@ -6496,6 +6938,7 @@ fn update_pending_team_invocation_payload(
             "runtimeId": &pending.team.runtime_agent_id,
             "name": &pending.team.name,
             "strategy": &pending.team.strategy,
+            "orchestrationPrompt": pending.team.orchestration_prompt.as_deref(),
             "status": status,
             "summary": summary,
             "content": summary,
@@ -8233,19 +8676,31 @@ fn load_team_profiles(conn: &Connection) -> Result<Vec<TeamProfileView>, String>
 }
 
 fn load_team_profile(conn: &Connection, team_id: &str) -> Result<TeamProfileView, String> {
-    let (id, name, description, strategy, aggregator_profile_id, runtime_policy, enabled, created_at, updated_at): (
+    let (
+        id,
+        name,
+        description,
+        strategy,
+        aggregator_profile_id,
+        runtime_policy,
+        orchestration_prompt,
+        enabled,
+        created_at,
+        updated_at,
+    ): (
         String,
         String,
         Option<String>,
         String,
         Option<String>,
         String,
+        Option<String>,
         i64,
         String,
         String,
     ) = conn
         .query_row(
-            "SELECT id, name, description, strategy, aggregator_profile_id, runtime_policy, enabled, created_at, updated_at
+            "SELECT id, name, description, strategy, aggregator_profile_id, runtime_policy, orchestration_prompt, enabled, created_at, updated_at
              FROM team_profiles WHERE id = ?1",
             params![team_id],
             |row| {
@@ -8259,6 +8714,7 @@ fn load_team_profile(conn: &Connection, team_id: &str) -> Result<TeamProfileView
                     row.get(6)?,
                     row.get(7)?,
                     row.get(8)?,
+                    row.get(9)?,
                 ))
             },
         )
@@ -8271,6 +8727,7 @@ fn load_team_profile(conn: &Connection, team_id: &str) -> Result<TeamProfileView
         strategy,
         aggregator_profile_id,
         runtime_policy,
+        orchestration_prompt,
         enabled: enabled != 0,
         members: load_team_members(conn, &id)?,
         created_at,
@@ -8318,6 +8775,11 @@ fn upsert_team_profile(
         .runtime_policy
         .clone()
         .unwrap_or_else(|| "member_default".to_string());
+    let orchestration_prompt = input
+        .orchestration_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let enabled = input.enabled.unwrap_or(true) as i64;
     if update {
         conn.execute(
@@ -8327,7 +8789,8 @@ fn upsert_team_profile(
                  strategy = ?4,
                  aggregator_profile_id = ?5,
                  runtime_policy = ?6,
-                 enabled = ?7,
+                 orchestration_prompt = ?7,
+                 enabled = ?8,
                  updated_at = datetime('now')
              WHERE id = ?1",
             params![
@@ -8337,6 +8800,7 @@ fn upsert_team_profile(
                 input.strategy,
                 input.aggregator_profile_id.as_deref(),
                 runtime_policy,
+                orchestration_prompt,
                 enabled
             ],
         )
@@ -8344,8 +8808,8 @@ fn upsert_team_profile(
     } else {
         conn.execute(
             "INSERT INTO team_profiles
-              (id, name, description, strategy, aggregator_profile_id, runtime_policy, enabled, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'), datetime('now'))",
+              (id, name, description, strategy, aggregator_profile_id, runtime_policy, orchestration_prompt, enabled, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'), datetime('now'))",
             params![
                 team_id,
                 input.name.trim(),
@@ -8353,6 +8817,7 @@ fn upsert_team_profile(
                 input.strategy,
                 input.aggregator_profile_id.as_deref(),
                 runtime_policy,
+                orchestration_prompt,
                 enabled
             ],
         )
@@ -10690,6 +11155,8 @@ struct AgentInvocationTarget<'a> {
     team_profile_id: Option<&'a str>,
     session_id: Option<&'a str>,
     parent_team_session_id: Option<&'a str>,
+    team_orchestration_prompt: Option<&'a str>,
+    team_member_assignment: Option<&'a str>,
     invocation_id: Option<&'a str>,
     block_id: Option<&'a str>,
 }
@@ -10824,6 +11291,8 @@ impl<'a> AgentInvocationContextBuilder<'a> {
                 "teamProfileId": target.team_profile_id,
                 "sessionId": target.session_id,
                 "parentTeamSessionId": target.parent_team_session_id,
+                "teamOrchestrationPrompt": target.team_orchestration_prompt,
+                "teamMemberAssignment": target.team_member_assignment,
                 "blockId": target.block_id,
             }),
             current_user_request: redact_sensitive_text(self.current_user_request),
@@ -11511,6 +11980,8 @@ fn build_main_runtime_direct_context(
         team_profile_id: None,
         session_id: Some(&main_session_id),
         parent_team_session_id: None,
+        team_orchestration_prompt: None,
+        team_member_assignment: None,
         invocation_id: None,
         block_id: None,
     };
@@ -13568,7 +14039,211 @@ fn apply_runtime_migrations(conn: &Connection) -> Result<(), String> {
     ensure_sqlite_column(conn, "projects", "archived_at", "TEXT")?;
     ensure_sqlite_column(conn, "projects", "deleted_at", "TEXT")?;
     ensure_sqlite_column(conn, "conversations", "deleted_at", "TEXT")?;
+    ensure_sqlite_column(conn, "team_profiles", "orchestration_prompt", "TEXT")?;
     remove_projects_root_path_unique_index(conn)?;
+    Ok(())
+}
+
+fn sqlite_table_exists(conn: &Connection, schema: &str, table: &str) -> Result<bool, String> {
+    let sql = format!(
+        "SELECT COUNT(*) FROM {}.sqlite_master WHERE type = 'table' AND name = ?1",
+        quote_sqlite_identifier(schema)
+    );
+    let count: i64 = conn
+        .query_row(&sql, params![table], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    Ok(count > 0)
+}
+
+fn sqlite_column_exists_in_schema(
+    conn: &Connection,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> Result<bool, String> {
+    let sql = format!(
+        "PRAGMA {}.table_info({})",
+        quote_sqlite_identifier(schema),
+        quote_sqlite_identifier(table)
+    );
+    let mut statement = conn.prepare(&sql).map_err(|error| error.to_string())?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(columns.iter().any(|item| item == column))
+}
+
+fn attached_legacy_user_library_count(conn: &Connection) -> Result<i64, String> {
+    let mut total = 0;
+    for table in [
+        "agent_profiles",
+        "runtime_bindings",
+        "team_profiles",
+        "team_members",
+    ] {
+        if sqlite_table_exists(conn, "legacy", table)? {
+            let sql = format!(
+                "SELECT COUNT(*) FROM legacy.{}",
+                quote_sqlite_identifier(table)
+            );
+            total += conn
+                .query_row(&sql, [], |row| row.get::<_, i64>(0))
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(total)
+}
+
+fn detach_legacy_database(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch("DETACH DATABASE legacy")
+        .map_err(|error| error.to_string())
+}
+
+fn import_attached_legacy_user_library(conn: &Connection) -> Result<(), String> {
+    if attached_legacy_user_library_count(conn)? == 0 {
+        return Ok(());
+    }
+
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|error| error.to_string())?;
+
+    let result = (|| -> Result<(), String> {
+        if sqlite_table_exists(conn, "legacy", "agent_profiles")? {
+            conn.execute(
+                "INSERT OR IGNORE INTO agent_profiles
+                  (id, name, role, description, instructions, expected_outputs_json,
+                   default_runtime_binding_id, allowed_runtime_ids_json, auto_invocation_allowed,
+                   permission_preference, tags_json, source, enabled, created_at, updated_at)
+                 SELECT id, name, role, description, instructions, expected_outputs_json,
+                        default_runtime_binding_id, allowed_runtime_ids_json, auto_invocation_allowed,
+                        permission_preference, tags_json, source, enabled, created_at, updated_at
+                 FROM legacy.agent_profiles",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+
+        if sqlite_table_exists(conn, "legacy", "runtime_bindings")? {
+            conn.execute(
+                "INSERT OR IGNORE INTO runtime_bindings
+                  (id, agent_profile_id, runtime_agent_id, policy, config_json, enabled, created_at, updated_at)
+                 SELECT rb.id, rb.agent_profile_id, rb.runtime_agent_id, rb.policy, rb.config_json,
+                        rb.enabled, rb.created_at, rb.updated_at
+                 FROM legacy.runtime_bindings rb
+                 WHERE EXISTS (SELECT 1 FROM agent_profiles ap WHERE ap.id = rb.agent_profile_id)
+                   AND EXISTS (SELECT 1 FROM runtime_agents ra WHERE ra.id = rb.runtime_agent_id)",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+            conn.execute(
+                "UPDATE agent_profiles
+                 SET default_runtime_binding_id = (
+                   SELECT rb.id
+                   FROM runtime_bindings rb
+                   WHERE rb.agent_profile_id = agent_profiles.id
+                     AND rb.policy = 'profile_default'
+                     AND rb.enabled = 1
+                   ORDER BY rb.created_at DESC
+                   LIMIT 1
+                 )
+                 WHERE EXISTS (
+                   SELECT 1
+                   FROM runtime_bindings rb
+                   WHERE rb.agent_profile_id = agent_profiles.id
+                     AND rb.policy = 'profile_default'
+                     AND rb.enabled = 1
+                 )",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+
+        if sqlite_table_exists(conn, "legacy", "team_profiles")? {
+            let team_profile_sql = if sqlite_column_exists_in_schema(
+                conn,
+                "legacy",
+                "team_profiles",
+                "orchestration_prompt",
+            )? {
+                "INSERT OR IGNORE INTO team_profiles
+                  (id, name, description, strategy, aggregator_profile_id, runtime_policy,
+                   orchestration_prompt, enabled, created_at, updated_at)
+                 SELECT id, name, description, strategy, aggregator_profile_id, runtime_policy,
+                        orchestration_prompt, enabled, created_at, updated_at
+                 FROM legacy.team_profiles"
+            } else {
+                "INSERT OR IGNORE INTO team_profiles
+                  (id, name, description, strategy, aggregator_profile_id, runtime_policy,
+                   orchestration_prompt, enabled, created_at, updated_at)
+                 SELECT id, name, description, strategy, aggregator_profile_id, runtime_policy,
+                        NULL, enabled, created_at, updated_at
+                 FROM legacy.team_profiles"
+            };
+            conn.execute(team_profile_sql, [])
+                .map_err(|error| error.to_string())?;
+        }
+
+        if sqlite_table_exists(conn, "legacy", "team_members")? {
+            conn.execute(
+                "INSERT OR IGNORE INTO team_members
+                  (id, team_profile_id, agent_profile_id, role_in_team, required, sort_order, created_at)
+                 SELECT tm.id, tm.team_profile_id, tm.agent_profile_id, tm.role_in_team,
+                        tm.required, tm.sort_order, tm.created_at
+                 FROM legacy.team_members tm
+                 WHERE EXISTS (SELECT 1 FROM team_profiles tp WHERE tp.id = tm.team_profile_id)
+                   AND EXISTS (SELECT 1 FROM agent_profiles ap WHERE ap.id = tm.agent_profile_id)",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+
+        Ok(())
+    })();
+
+    if let Err(error) = result {
+        let _ = conn.execute_batch("ROLLBACK");
+        return Err(error);
+    }
+
+    conn.execute_batch("COMMIT")
+        .map_err(|error| error.to_string())
+}
+
+fn import_legacy_user_library_if_available(
+    conn: &Connection,
+    current_db_path: &Path,
+    app_data_dir: &Path,
+) -> Result<(), String> {
+    let Some(parent_dir) = app_data_dir.parent() else {
+        return Ok(());
+    };
+    let current_canonical = current_db_path.canonicalize().ok();
+    for legacy_dir_name in LEGACY_APP_DATA_DIR_NAMES {
+        let legacy_db_path = parent_dir.join(legacy_dir_name).join(DATABASE_FILE);
+        if !legacy_db_path.exists() {
+            continue;
+        }
+        if current_canonical.as_ref().is_some_and(|current_path| {
+            legacy_db_path
+                .canonicalize()
+                .as_ref()
+                .is_ok_and(|legacy_path| legacy_path == current_path)
+        }) {
+            continue;
+        }
+        let legacy_db_path_string = legacy_db_path.to_string_lossy().to_string();
+        conn.execute(
+            "ATTACH DATABASE ?1 AS legacy",
+            params![legacy_db_path_string],
+        )
+        .map_err(|error| error.to_string())?;
+        let import_result = import_attached_legacy_user_library(conn);
+        let detach_result = detach_legacy_database(conn);
+        import_result?;
+        detach_result?;
+    }
     Ok(())
 }
 
@@ -13600,6 +14275,8 @@ fn initialize_sqlite(app_handle: &tauri::AppHandle) -> Result<PathBuf, Box<dyn s
     let registry = load_registry()
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     seed_registry_agents(&conn, &registry)?;
+    import_legacy_user_library_if_available(&conn, &db_path, &app_data_dir)
+        .map_err(std::io::Error::other)?;
     backfill_thread_model(&conn).map_err(std::io::Error::other)?;
     mark_stale_runtime_invocations(&conn).map_err(std::io::Error::other)?;
     recover_interrupted_conversation_turns(&conn).map_err(std::io::Error::other)?;
@@ -13722,6 +14399,225 @@ mod tests {
             params![conversation_id, project_id, deleted_at],
         )
         .expect("insert conversation");
+    }
+
+    fn test_pending_team(orchestration_prompt: Option<&str>) -> PendingTeamInvocation {
+        let agents = vec![
+            fallback_agent_invocation(
+                "@Review Team / Alpha",
+                "Alpha",
+                "reviewer",
+                "codex_cli".to_string(),
+                Some("team-profile"),
+                "test",
+            ),
+            fallback_agent_invocation(
+                "@Review Team / Beta",
+                "Beta",
+                "tester",
+                "codex_cli".to_string(),
+                Some("team-profile"),
+                "test",
+            ),
+            fallback_agent_invocation(
+                "@Review Team / Gamma",
+                "Gamma",
+                "analyst",
+                "codex_cli".to_string(),
+                Some("team-profile"),
+                "test",
+            ),
+        ];
+        let members = agents
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, agent)| PendingAgentInvocation {
+                invocation_id: format!("member-invocation-{index}"),
+                agent_session_id: format!("agent-session-{index}"),
+                parent_team_session_id: Some("team-session".to_string()),
+                parent_invocation_id: Some("team-invocation".to_string()),
+                parent_team_name: Some("Review Team".to_string()),
+                block_id: format!("member-block-{index}"),
+                agent,
+            })
+            .collect::<Vec<_>>();
+        PendingTeamInvocation {
+            invocation_id: "team-invocation".to_string(),
+            team_session_id: "team-session".to_string(),
+            block_id: "team-block".to_string(),
+            team: ResolvedTeamInvocation {
+                mention_label: "@Review Team".to_string(),
+                team_profile_id: Some("team-profile".to_string()),
+                context_session_id: None,
+                context_participant_id: None,
+                runtime_agent_id: "codex_cli".to_string(),
+                name: "Review Team".to_string(),
+                description: None,
+                strategy: "parallel_consensus".to_string(),
+                runtime_policy: "member_default".to_string(),
+                orchestration_prompt: orchestration_prompt.map(str::to_string),
+                members: agents,
+            },
+            members,
+        }
+    }
+
+    #[test]
+    fn legacy_user_library_import_merges_profiles_teams_and_bindings() {
+        let root_dir = env::temp_dir().join(generated_id("ats-legacy-library"));
+        let current_dir = root_dir.join("com.agentteamstudio.studio");
+        let legacy_dir = root_dir.join("com.agentteamstudio.desktop");
+        fs::create_dir_all(&current_dir).expect("create current app dir");
+        fs::create_dir_all(&legacy_dir).expect("create legacy app dir");
+        let current_db = current_dir.join(DATABASE_FILE);
+        let legacy_db = legacy_dir.join(DATABASE_FILE);
+
+        let current_conn = Connection::open(&current_db).expect("open current db");
+        current_conn
+            .execute_batch(SCHEMA_SQL)
+            .expect("create current schema");
+        current_conn
+            .execute_batch(SOLO_THREAD_SCHEMA_SQL)
+            .expect("create current thread schema");
+        apply_runtime_migrations(&current_conn).expect("migrate current schema");
+        current_conn
+            .execute(
+                "INSERT INTO runtime_agents
+                  (id, kind, display_name, status, capabilities_json, config_json, created_at, updated_at)
+                 VALUES ('codex_cli', 'cli', 'Codex', 'ready', '[]', '{}', datetime('now'), datetime('now'))",
+                [],
+            )
+            .expect("insert current runtime");
+
+        let legacy_conn = Connection::open(&legacy_db).expect("open legacy db");
+        let legacy_schema = SCHEMA_SQL.replace("  orchestration_prompt TEXT,\n", "");
+        legacy_conn
+            .execute_batch(&legacy_schema)
+            .expect("create legacy schema");
+        legacy_conn
+            .execute(
+                "INSERT INTO runtime_agents
+                  (id, kind, display_name, status, capabilities_json, config_json, created_at, updated_at)
+                 VALUES ('codex_cli', 'cli', 'Codex', 'ready', '[]', '{}', datetime('now'), datetime('now'))",
+                [],
+            )
+            .expect("insert legacy runtime");
+        legacy_conn
+            .execute(
+                "INSERT INTO agent_profiles
+                  (id, name, role, description, instructions, expected_outputs_json,
+                   default_runtime_binding_id, allowed_runtime_ids_json, auto_invocation_allowed,
+                   permission_preference, tags_json, source, enabled, created_at, updated_at)
+                 VALUES
+                  ('agent-profile-legacy', 'Legacy Reviewer', 'reviewer', NULL, 'Review carefully.',
+                   '[\"Findings\"]', 'runtime-binding-legacy', '[\"codex_cli\"]', 1,
+                   'suggest_patch', '[]', 'user_created', 1, '2026-05-18T00:00:00Z', '2026-05-18T00:00:00Z')",
+                [],
+            )
+            .expect("insert legacy profile");
+        legacy_conn
+            .execute(
+                "INSERT INTO runtime_bindings
+                  (id, agent_profile_id, runtime_agent_id, policy, config_json, enabled, created_at, updated_at)
+                 VALUES
+                  ('runtime-binding-legacy', 'agent-profile-legacy', 'codex_cli', 'profile_default',
+                   '{}', 1, '2026-05-18T00:00:00Z', '2026-05-18T00:00:00Z')",
+                [],
+            )
+            .expect("insert legacy runtime binding");
+        legacy_conn
+            .execute(
+                "INSERT INTO team_profiles
+                  (id, name, description, strategy, aggregator_profile_id, runtime_policy, enabled, created_at, updated_at)
+                 VALUES
+                  ('team-profile-legacy', 'Legacy Review Team', NULL, 'parallel_consensus', NULL,
+                   'member_default', 1, '2026-05-18T00:00:00Z', '2026-05-18T00:00:00Z')",
+                [],
+            )
+            .expect("insert legacy team");
+        legacy_conn
+            .execute(
+                "INSERT INTO team_members
+                  (id, team_profile_id, agent_profile_id, role_in_team, required, sort_order, created_at)
+                 VALUES
+                  ('team-member-legacy', 'team-profile-legacy', 'agent-profile-legacy',
+                   'reviewer', 1, 0, '2026-05-18T00:00:00Z')",
+                [],
+            )
+            .expect("insert legacy team member");
+        drop(legacy_conn);
+
+        import_legacy_user_library_if_available(&current_conn, &current_db, &current_dir)
+            .expect("import legacy library");
+
+        let profiles = load_agent_profiles(&current_conn).expect("load imported profiles");
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].id, "agent-profile-legacy");
+        assert_eq!(profiles[0].default_runtime_id.as_deref(), Some("codex_cli"));
+
+        let teams = load_team_profiles(&current_conn).expect("load imported teams");
+        assert_eq!(teams.len(), 1);
+        assert_eq!(teams[0].id, "team-profile-legacy");
+        assert_eq!(teams[0].orchestration_prompt, None);
+        assert_eq!(teams[0].members.len(), 1);
+        assert_eq!(teams[0].members[0].agent_profile_id, "agent-profile-legacy");
+
+        let _ = fs::remove_dir_all(root_dir);
+    }
+
+    #[test]
+    fn default_team_execution_plan_runs_all_members_in_one_parallel_batch() {
+        let pending = test_pending_team(None);
+        let plan = default_parallel_team_execution_plan(&pending, "default", "No team prompt.");
+
+        assert_eq!(plan.source, "default");
+        assert_eq!(plan.summary, "No team prompt.");
+        assert_eq!(plan.batches.len(), 1);
+        assert_eq!(plan.batches[0].label, "Parallel review");
+        assert_eq!(plan.batches[0].members.len(), 3);
+        assert_eq!(
+            plan.batches[0]
+                .members
+                .iter()
+                .map(|member| member.pending.agent.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Alpha", "Beta", "Gamma"]
+        );
+        assert!(plan.batches[0]
+            .members
+            .iter()
+            .all(|member| member.assignment.is_none()));
+    }
+
+    #[test]
+    fn team_execution_plan_parser_preserves_batches_assignments_and_appends_unassigned() {
+        let pending = test_pending_team(Some("Review first, validate second."));
+        let output = r#"
+        Planner result:
+        {"summary":"Review first, then validate","batches":[{"label":"Review","members":[{"memberIndex":1,"assignment":"Check the changed behavior."}]},{"label":"Validate","members":[{"name":"Alpha","assignment":"Verify tests and risks."}]}]}
+        "#;
+
+        let plan = parse_team_execution_plan(output, &pending).expect("parse plan");
+
+        assert_eq!(plan.source, "team_prompt");
+        assert_eq!(plan.summary, "Review first, then validate");
+        assert_eq!(plan.batches.len(), 3);
+        assert_eq!(plan.batches[0].label, "Review");
+        assert_eq!(plan.batches[0].members[0].pending.agent.name, "Beta");
+        assert_eq!(
+            plan.batches[0].members[0].assignment.as_deref(),
+            Some("Check the changed behavior.")
+        );
+        assert_eq!(plan.batches[1].label, "Validate");
+        assert_eq!(plan.batches[1].members[0].pending.agent.name, "Alpha");
+        assert_eq!(
+            plan.batches[1].members[0].assignment.as_deref(),
+            Some("Verify tests and risks.")
+        );
+        assert_eq!(plan.batches[2].label, "Unassigned members");
+        assert_eq!(plan.batches[2].members[0].pending.agent.name, "Gamma");
+        assert!(plan.batches[2].members[0].assignment.is_none());
     }
 
     #[test]

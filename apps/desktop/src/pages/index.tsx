@@ -567,9 +567,10 @@ function importedTeamToInput(value: unknown): TeamProfileInput | null {
   return {
     name,
     description: String(value.description ?? "").trim() || null,
-    strategy: String(value.strategy ?? "sequential_flow") as TeamProfile["strategy"],
+    strategy: String(value.strategy ?? "parallel_consensus") as TeamProfile["strategy"],
     aggregatorProfileId: String(value.aggregatorProfileId ?? "").trim() || null,
     runtimePolicy: String(value.runtimePolicy ?? "member_default") as TeamProfile["runtimePolicy"],
+    orchestrationPrompt: String(value.orchestrationPrompt ?? "").trim() || null,
     enabled: value.enabled !== false,
     members: rawMembers
       .filter(isRecord)
@@ -1446,12 +1447,13 @@ function teamToInput(team: TeamProfile): TeamProfileInput {
     strategy: team.strategy,
     aggregatorProfileId: team.aggregatorProfileId ?? null,
     runtimePolicy: team.runtimePolicy,
+    orchestrationPrompt: team.orchestrationPrompt ?? "",
     enabled: team.enabled,
-    members: team.members.map((member) => ({
+    members: team.members.map((member, index) => ({
       agentProfileId: member.agentProfileId,
       roleInTeam: member.roleInTeam ?? "",
       required: member.required,
-      sortOrder: member.sortOrder
+      sortOrder: member.sortOrder ?? index
     }))
   };
 }
@@ -1460,12 +1462,27 @@ function emptyTeamInput(): TeamProfileInput {
   return {
     name: "",
     description: "",
-    strategy: "sequential_flow",
+    strategy: "parallel_consensus",
     aggregatorProfileId: null,
     runtimePolicy: "member_default",
+    orchestrationPrompt: "",
     enabled: true,
     members: []
   };
+}
+
+function orderedTeamMembers(members: NonNullable<TeamProfileInput["members"]>) {
+  return [...members].sort((a, b) => (
+    (a.sortOrder ?? 0) - (b.sortOrder ?? 0)
+    || a.agentProfileId.localeCompare(b.agentProfileId)
+  ));
+}
+
+function nextTeamMemberSortOrder(members: NonNullable<TeamProfileInput["members"]>): number {
+  if (!members.length) {
+    return 0;
+  }
+  return Math.max(...members.map((member, index) => member.sortOrder ?? index)) + 1;
 }
 
 export function TeamsPage({
@@ -1482,6 +1499,7 @@ export function TeamsPage({
   const [selectedTeamId, setSelectedTeamId] = useState<string | null>(teamProfiles[0]?.id ?? null);
   const selectedTeam = teamProfiles.find((team) => team.id === selectedTeamId) ?? null;
   const [draft, setDraft] = useState<TeamProfileInput>(() => selectedTeam ? teamToInput(selectedTeam) : emptyTeamInput());
+  const [creatingNewTeam, setCreatingNewTeam] = useState(false);
   const [saving, setSaving] = useState(false);
   const [libraryJson, setLibraryJson] = useState("");
   const [libraryNotice, setLibraryNotice] = useState("");
@@ -1490,6 +1508,7 @@ export function TeamsPage({
   useEffect(() => {
     if (selectedTeam) {
       setDraft(teamToInput(selectedTeam));
+      setCreatingNewTeam(false);
     }
   }, [selectedTeam]);
 
@@ -1501,35 +1520,70 @@ export function TeamsPage({
     }
   }, [selectedTeamId, teamProfiles]);
 
+  useEffect(() => {
+    if (!selectedTeamId && !creatingNewTeam && teamProfiles.length) {
+      setSelectedTeamId(teamProfiles[0].id);
+    }
+  }, [creatingNewTeam, selectedTeamId, teamProfiles]);
+
   const selectedMemberIds = new Set((draft.members ?? []).map((member) => member.agentProfileId));
   const toggleMember = (profile: AgentProfile, checked: boolean) => {
-    const members = draft.members ?? [];
-    if (!checked) {
-      setDraft({ ...draft, members: members.filter((member) => member.agentProfileId !== profile.id) });
-      return;
-    }
-    setDraft({
-      ...draft,
-      members: [
-        ...members,
-        {
-          agentProfileId: profile.id,
-          roleInTeam: profile.role,
-          required: true,
-          sortOrder: members.length
-        }
-      ]
+    setDraft((current) => {
+      const members = current.members ?? [];
+      if (!checked) {
+        return { ...current, members: members.filter((member) => member.agentProfileId !== profile.id) };
+      }
+      if (members.some((member) => member.agentProfileId === profile.id)) {
+        return current;
+      }
+      return {
+        ...current,
+        members: [
+          ...members,
+          {
+            agentProfileId: profile.id,
+            roleInTeam: profile.role,
+            required: true,
+            sortOrder: nextTeamMemberSortOrder(members)
+          }
+        ]
+      };
     });
   };
 
   const updateMember = (agentProfileId: string, patch: Partial<NonNullable<TeamProfileInput["members"]>[number]>) => {
-    setDraft({
-      ...draft,
-      members: (draft.members ?? []).map((member) => (
+    setDraft((current) => ({
+      ...current,
+      members: (current.members ?? []).map((member) => (
         member.agentProfileId === agentProfileId
           ? { ...member, ...patch }
           : member
       ))
+    }));
+  };
+
+  const removeMember = (agentProfileId: string) => {
+    setDraft((current) => ({
+      ...current,
+      members: (current.members ?? []).filter((member) => member.agentProfileId !== agentProfileId)
+    }));
+  };
+
+  const moveMember = (agentProfileId: string, direction: -1 | 1) => {
+    setDraft((current) => {
+      const ordered = orderedTeamMembers(current.members ?? []);
+      const fromIndex = ordered.findIndex((member) => member.agentProfileId === agentProfileId);
+      const toIndex = fromIndex + direction;
+      if (fromIndex < 0 || toIndex < 0 || toIndex >= ordered.length) {
+        return current;
+      }
+      const next = [...ordered];
+      const [member] = next.splice(fromIndex, 1);
+      next.splice(toIndex, 0, member);
+      return {
+        ...current,
+        members: next.map((item, index) => ({ ...item, sortOrder: index }))
+      };
     });
   };
 
@@ -1541,6 +1595,7 @@ export function TeamsPage({
     try {
       const saved = await onSaveTeamProfile(draft, selectedTeam?.id ?? null);
       setSelectedTeamId(saved.id);
+      setCreatingNewTeam(false);
     } finally {
       setSaving(false);
     }
@@ -1557,6 +1612,7 @@ export function TeamsPage({
         name: `${selectedTeam.name} copy`
       }, null);
       setSelectedTeamId(saved.id);
+      setCreatingNewTeam(false);
     } finally {
       setSaving(false);
     }
@@ -1570,6 +1626,7 @@ export function TeamsPage({
     const nextTeam = teamProfiles.find((team) => team.id !== selectedTeam.id) ?? null;
     setSelectedTeamId(nextTeam?.id ?? null);
     setDraft(nextTeam ? teamToInput(nextTeam) : emptyTeamInput());
+    setCreatingNewTeam(!nextTeam);
   };
 
   const exportTeams = async () => {
@@ -1628,6 +1685,7 @@ export function TeamsPage({
               onClick={() => {
                 setSelectedTeamId(null);
                 setDraft(emptyTeamInput());
+                setCreatingNewTeam(true);
               }}
             >
               New team
@@ -1637,7 +1695,10 @@ export function TeamsPage({
                 key={team.id}
                 type="button"
                 className={team.id === selectedTeamId ? "is-active" : undefined}
-                onClick={() => setSelectedTeamId(team.id)}
+                onClick={() => {
+                  setSelectedTeamId(team.id);
+                  setCreatingNewTeam(false);
+                }}
               >
                 <strong>{team.name}</strong>
                 <span>{team.members.length} members · {team.strategy.replaceAll("_", " ")}</span>
@@ -1701,8 +1762,12 @@ export function TeamsPage({
               Description
               <textarea value={draft.description ?? ""} onChange={(event) => setDraft({ ...draft, description: event.target.value })} />
             </label>
+            <label>
+              Team prompt
+              <textarea value={draft.orchestrationPrompt ?? ""} onChange={(event) => setDraft({ ...draft, orchestrationPrompt: event.target.value })} />
+            </label>
             <div className="team-member-picker">
-              <strong>Members</strong>
+              <strong>Available agents</strong>
               {agentProfiles.length ? agentProfiles.map((profile) => (
                 <label key={profile.id}>
                   <input
@@ -1717,11 +1782,18 @@ export function TeamsPage({
             </div>
             {(draft.members ?? []).length ? (
               <div className="team-member-config-list">
-                {(draft.members ?? []).map((member, index) => {
+                <div className="team-member-config-heading">
+                  <strong>Team members</strong>
+                  <span>{draft.members?.length ?? 0} selected</span>
+                </div>
+                {orderedTeamMembers(draft.members ?? []).map((member, index) => {
                   const profile = agentProfiles.find((item) => item.id === member.agentProfileId);
                   return (
                     <div key={member.agentProfileId} className="team-member-config-row">
-                      <strong>{profile?.name ?? member.agentProfileId}</strong>
+                      <div>
+                        <strong>{profile?.name ?? member.agentProfileId}</strong>
+                        <small>{profile ? profile.role : "Missing agent profile"}</small>
+                      </div>
                       <input
                         value={member.roleInTeam ?? ""}
                         placeholder={profile?.role ?? "Role in team"}
@@ -1741,11 +1813,22 @@ export function TeamsPage({
                         value={member.sortOrder ?? index}
                         onChange={(event) => updateMember(member.agentProfileId, { sortOrder: Number(event.target.value) || 0 })}
                       />
+                      <div className="team-member-config-actions">
+                        <Button variant="ghost" size="sm" onClick={() => moveMember(member.agentProfileId, -1)} disabled={index === 0}>
+                          Up
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={() => moveMember(member.agentProfileId, 1)} disabled={index === (draft.members?.length ?? 1) - 1}>
+                          Down
+                        </Button>
+                        <Button variant="danger" size="sm" onClick={() => removeMember(member.agentProfileId)}>
+                          Remove
+                        </Button>
+                      </div>
                     </div>
                   );
                 })}
               </div>
-            ) : null}
+            ) : <p className="team-member-empty">No members selected.</p>}
             <div className="button-row">
               <Button variant="primary" onClick={saveTeam} disabled={saving || !draft.name.trim()}>
                 {saving ? "Saving..." : selectedTeam ? "Save changes" : "Save team"}
@@ -1774,6 +1857,7 @@ export function TeamsPage({
                   name: template,
                   description: `${template} reusable coordination profile.`
                 });
+                setCreatingNewTeam(true);
               }}
             >
               <strong>{template}</strong>

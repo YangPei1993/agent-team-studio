@@ -372,6 +372,7 @@ export interface TeamProfile {
   strategy: "parallel_consensus" | "sequential_flow" | "review_then_act" | "debate_then_judge" | "map_reduce" | "custom" | string;
   aggregatorProfileId?: string | null;
   runtimePolicy: "member_default" | "conversation_main" | "best_available" | "ask_each_time" | string;
+  orchestrationPrompt?: string | null;
   enabled: boolean;
   members: TeamMemberProfile[];
   createdAt: string;
@@ -391,6 +392,7 @@ export interface TeamProfileInput {
   strategy: TeamProfile["strategy"];
   aggregatorProfileId?: string | null;
   runtimePolicy?: TeamProfile["runtimePolicy"];
+  orchestrationPrompt?: string | null;
   enabled?: boolean;
   members?: TeamMemberProfileInput[];
 }

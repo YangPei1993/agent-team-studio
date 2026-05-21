@@ -283,6 +283,7 @@ CREATE TABLE IF NOT EXISTS team_profiles (
   strategy TEXT NOT NULL,
   aggregator_profile_id TEXT,
   runtime_policy TEXT NOT NULL DEFAULT 'member_default',
+  orchestration_prompt TEXT,
   enabled INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL

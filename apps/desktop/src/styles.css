@@ -1004,9 +1004,23 @@ button.template-tile:hover {
   border-radius: var(--radius-sm);
 }
 
+.team-member-config-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+}
+
+.team-member-config-heading span,
+.team-member-config-row small,
+.team-member-empty {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .team-member-config-row {
   display: grid;
-  grid-template-columns: minmax(120px, 0.8fr) minmax(160px, 1fr) minmax(92px, 0.5fr) 76px;
+  grid-template-columns: minmax(140px, 0.8fr) minmax(150px, 1fr) minmax(92px, 0.45fr) 72px auto;
   gap: var(--spacing-sm);
   align-items: center;
 }
@@ -1019,12 +1033,29 @@ button.template-tile:hover {
   white-space: nowrap;
 }
 
+.team-member-config-row > div:first-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
 .team-member-config-row label {
   display: inline-flex;
   align-items: center;
   gap: var(--spacing-xs);
   color: var(--muted);
   font-size: 12px;
+}
+
+.team-member-config-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+  justify-content: flex-end;
+}
+
+.team-member-empty {
+  margin: 0;
 }
 
 .project-layout {

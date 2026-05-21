@@ -242,6 +242,7 @@ interface LocalTeamInvocation {
   description: string | null;
   strategy: string;
   runtimePolicy: string;
+  orchestrationPrompt: string | null;
   members: LocalAgentInvocation[];
 }
 
@@ -393,6 +394,7 @@ function resolveLocalTeamMention(
       description: team.description ?? null,
       strategy: team.strategy,
       runtimePolicy: team.runtimePolicy,
+      orchestrationPrompt: team.orchestrationPrompt ?? null,
       members
     };
   }
@@ -406,6 +408,7 @@ function resolveLocalTeamMention(
     description: "Template team invoked from the composer.",
     strategy: "parallel_consensus",
     runtimePolicy: "conversation_main",
+    orchestrationPrompt: null,
     members: [
       fallbackLocalAgent(`@${mention.label} / coordinator`, `${mention.label} coordinator`, "coordinator", teamRuntimeId, null, "team_template"),
       fallbackLocalAgent(`@${mention.label} / reviewer`, `${mention.label} reviewer`, "reviewer", teamRuntimeId, null, "team_template")
@@ -1222,6 +1225,7 @@ export async function sendConversationMessage(
         runtimeId: team.runtimeId,
         name: team.name,
         strategy: team.strategy,
+        orchestrationPrompt: team.orchestrationPrompt,
         status: "completed",
         summary: teamSummary,
         members: memberNames
@@ -1681,6 +1685,7 @@ export async function createTeamProfile(input: TeamProfileInput): Promise<TeamPr
     strategy: input.strategy,
     aggregatorProfileId: input.aggregatorProfileId ?? null,
     runtimePolicy: input.runtimePolicy ?? "member_default",
+    orchestrationPrompt: input.orchestrationPrompt?.trim() || null,
     enabled: input.enabled ?? true,
     members: (input.members ?? []).map((member, index) => {
       const profile = agentProfiles.find((item) => item.id === member.agentProfileId);
@@ -1718,6 +1723,7 @@ export async function updateTeamProfile(teamId: string, input: TeamProfileInput)
     strategy: input.strategy,
     aggregatorProfileId: input.aggregatorProfileId ?? null,
     runtimePolicy: input.runtimePolicy ?? "member_default",
+    orchestrationPrompt: input.orchestrationPrompt?.trim() || null,
     enabled: input.enabled ?? true,
     members: (input.members ?? []).map((member, index) => {
       const profile = agentProfiles.find((item) => item.id === member.agentProfileId);
